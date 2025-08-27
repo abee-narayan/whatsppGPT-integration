@@ -1,75 +1,51 @@
-"""Make some requests to OpenAI's chatbot"""
+"""Simple Flask server that proxies requests to OpenAI's Chat API.
 
-import time
-import os 
-import flask
-import sys
+This replaces the previous Playwright-based approach for interacting with
+chat.openai.com directly. Instead, it uses the official OpenAI Python client
+library which is more stable and requires an API key.
 
-from flask import g
+Run with:
 
-from playwright.sync_api import sync_playwright
+```
+export OPENAI_API_KEY=your_key_here
+python server.py
+```
 
-PROFILE_DIR = "/tmp/playwright" if '--profile' not in sys.argv else sys.argv[sys.argv.index('--profile') + 1]
-PORT = 5001 if '--port' not in sys.argv else int(sys.argv[sys.argv.index('--port') + 1])
-APP = flask.Flask(__name__)
-PLAY = sync_playwright().start()
-BROWSER = PLAY.firefox.launch_persistent_context(
-    user_data_dir=PROFILE_DIR,
-    headless=False,
-)
-PAGE = BROWSER.new_page()
+Send a GET request to `/chat?q=<message>` and the server will return the model
+response.
+"""
 
-def get_input_box():
-    """Find the input box by searching for the largest visible one."""
-    textareas = PAGE.query_selector_all("textarea")
-    candidate = None
-    for textarea in textareas:
-        if textarea.is_visible():
-            if candidate is None:
-                candidate = textarea
-            elif textarea.bounding_box().width > candidate.bounding_box().width:
-                candidate = textarea
-    return candidate
+import os
+from flask import Flask, request
+import openai
 
-def is_logged_in():
-    try:
-        return get_input_box() is not None
-    except AttributeError:
-        return False
 
-def send_message(message):
-    # Send the message
-    box = get_input_box()
-    box.click()
-    box.fill(message)
-    box.press("Enter")
-    while PAGE.query_selector(".result-streaming") is not None:
-        time.sleep(0.1)
+APP = Flask(__name__)
 
-def get_last_message():
-    """Get the latest message"""
-    page_elements = PAGE.query_selector_all(".flex.flex-col.items-center > div")
-    last_element = page_elements[-2]
-    return last_element.inner_text()
+# Configure OpenAI API
+openai.api_key = os.environ.get("OPENAI_API_KEY")
+MODEL = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo")
+
 
 @APP.route("/chat", methods=["GET"])
-def chat():
-    message = flask.request.args.get("q")
-    print("Sending message: ", message)
-    send_message(message)
-    response = get_last_message()
-    print("Response: ", response)
-    return response
+def chat() -> str:
+    """Return a chat completion for the provided query string."""
+    message = request.args.get("q")
+    if not message:
+        return "Missing 'q' query parameter", 400
+    if not openai.api_key:
+        return "OpenAI API key not configured", 500
+    try:
+        completion = openai.ChatCompletion.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": message}],
+        )
+        return completion.choices[0].message["content"].strip()
+    except Exception as exc:  # pragma: no cover - simple error passthrough
+        return f"Error: {exc}", 500
 
-def start_browser():
-    PAGE.goto("https://chat.openai.com/")
-    APP.run(port=PORT, threaded=False)
-    if not is_logged_in():
-        print("Please log in to OpenAI Chat")
-        print("Press enter when you're done")
-        input()
-    else:
-        print("Logged in")
-        
+
 if __name__ == "__main__":
-    start_browser()
+    port = int(os.environ.get("PORT", 5001))
+    APP.run(port=port, threaded=True)
+
